@@ -151,6 +151,8 @@ TW_INCLUDE_FASTBOOTD := true
 # Other TWRP Configurations
 TW_THEME := portrait_hdpi
 TW_DEVICE_VERSION := JohnTheFarm3r
+TW_Y_OFFSET := 144
+TW_H_OFFSET := -144
 TW_FRAMERATE := 120
 RECOVERY_SDCARD_ON_DATA := true
 TARGET_RECOVERY_QCOM_RTC_FIX := true
@@ -166,6 +168,7 @@ TW_INPUT_BLACKLIST := "hbtp_vm"
 TW_BRIGHTNESS_PATH := "/sys/devices/platform/soc/9800000.qcom,mdss_mdp/backlight/panel0-backlight/brightness"
 TW_MAX_BRIGHTNESS := 16383
 TW_DEFAULT_BRIGHTNESS := 4096
+TW_CUSTOM_CPU_TEMP_PATH := "/sys/class/thermal/thermal_zone78/temp"
 TW_EXTRA_LANGUAGES := true
 TW_EXCLUDE_APEX := true
 TW_HAS_EDL_MODE := true

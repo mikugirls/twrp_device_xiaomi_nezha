@@ -22,14 +22,6 @@ on fs
     mkdir /mnt/vendor 0775 shell system
     mkdir /mnt/vendor/persist 0771 root system
     mount ext4 /dev/block/bootdevice/by-name/persist /mnt/vendor/persist nosuid nodev barrier=1
-    start recovery.nezha-persist-alias
-
-service recovery.nezha-persist-alias /system/bin/nezha-persist-alias.sh
-    user root
-    group root
-    disabled
-    oneshot
-    seclabel u:r:recovery:s0
 
 service recovery.nezha-crypto-timeout /system/bin/sh -c "sleep 30; setprop ctl.start odm.prepdecrypt"
     user root
