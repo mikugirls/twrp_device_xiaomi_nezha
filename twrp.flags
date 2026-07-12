@@ -26,3 +26,6 @@
 
 # Metadata
 /metadata           f2fs    /dev/block/by-name/metadata          flags=display="Metadata";wrappedkey
+
+# USB OTG (the wildcard parent is hidden until a real block device appears)
+/usbotg             auto    /devices/platform/soc/a600000.ssusb/*.dwc3/xhci-hcd.*.auto* flags=display="USB OTG";storagename="USB OTG";storage;removable;wipeingui

@@ -27,3 +27,5 @@ apply_patch system/vold \
     "$device_dir/patches/twrp-16/0001-vold-fix-synthetic-password-gcm.patch"
 apply_patch bootable/recovery \
     "$device_dir/patches/twrp-16/0002-recovery-report-super-partition-size.patch"
+apply_patch bootable/recovery \
+    "$device_dir/patches/twrp-16/0003-recovery-fix-removable-storage-and-battery.patch"
