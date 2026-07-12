@@ -52,8 +52,11 @@ BOARD_MKBOOTIMG_ARGS += --header_version $(BOARD_BOOT_HEADER_VERSION)
 BOARD_MKBOOTIMG_ARGS += --pagesize $(BOARD_KERNEL_PAGESIZE)
 # Let build system set proper OS version (was 0.0.0 which may affect bootloader USB init)
 
-# SELinux permissive for recovery
+# Kernel argument is retained for configurations that package a recovery kernel;
+# Nezha's ramdisk-only recovery inherits the enforcing boot kernel instead.
 BOARD_KERNEL_CMDLINE += androidboot.selinux=permissive
+# Device-specific recovery labels
+BOARD_SEPOLICY_DIRS += $(DEVICE_PATH)/sepolicy
 
 # Ramdisk use lz4
 BOARD_RAMDISK_USE_LZ4 := true

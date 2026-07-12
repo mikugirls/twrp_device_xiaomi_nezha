@@ -81,6 +81,11 @@ TWRP_REQUIRED_MODULES += \
     prebuilt \
     task_profiles.json
 
+# Recovery-native AIDL BootControl is required by update_engine_sideload when
+# installing A/B HyperOS recovery OTAs.
+PRODUCT_PACKAGES += \
+    android.hardware.boot-service.default_recovery
+
 # Soong namespaces
 PRODUCT_SOONG_NAMESPACES += \
     $(DEVICE_PATH)

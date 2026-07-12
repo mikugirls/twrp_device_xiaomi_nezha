@@ -1,0 +1,3 @@
+# Nezha UFS partition layout: misc is sda12. BootControl requires the specific
+# misc_block_device label rather than the generic block_device fallback.
+/dev/block/sda12    u:object_r:misc_block_device:s0
