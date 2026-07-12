@@ -22,7 +22,7 @@
 /efs2               emmc    /dev/block/by-name/modemst2          flags=backup=1;subpartitionof=/efs1
 
 # Persist
-/mnt/vendor/persist ext4    /dev/block/by-name/persist           flags=display="Persist";backup=1;backupname=persist;fsflags=ro
+/persist            ext4    /dev/block/by-name/persist           flags=display="Persist";backup=1;backupname=persist;fsflags=ro
 
 # Metadata
 /metadata           f2fs    /dev/block/by-name/metadata          flags=display="Metadata";wrappedkey

@@ -20,8 +20,9 @@ on fs
     wait /dev/block/platform/soc/${ro.boot.bootdevice}
     symlink /dev/block/platform/soc/${ro.boot.bootdevice} /dev/block/bootdevice
     mkdir /mnt/vendor 0775 shell system
-    mkdir /mnt/vendor/persist 0771 root system
-    mount ext4 /dev/block/bootdevice/by-name/persist /mnt/vendor/persist nosuid nodev barrier=1
+    mkdir /persist 0771 root system
+    mount ext4 /dev/block/bootdevice/by-name/persist /persist nosuid nodev barrier=1
+    symlink /persist /mnt/vendor/persist
 
 service recovery.nezha-crypto-timeout /system/bin/sh -c "sleep 30; setprop ctl.start odm.prepdecrypt"
     user root
