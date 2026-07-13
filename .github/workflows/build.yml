@@ -1,0 +1,137 @@
+name: Build
+
+on:
+  push:
+    branches: [ "**" ]
+  workflow_dispatch:   # 手动触发，自动生成 Release
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360   # 防止超时被 kill
+    permissions:
+      contents: write   # 允许创建 Release
+
+    steps:
+      - name: 基础环境配置
+        run: |
+          sudo apt update
+          sudo apt install -y git-core gnupg flex bison build-essential zip curl \
+            zlib1g-dev gcc-multilib g++-multilib libc6-dev-i386 libncurses5 \
+            lib32ncurses5-dev x11proto-core-dev libx11-dev libgl1-mesa-glx \
+            libxml2-utils xsltproc unzip python3 python-is-python3 libssl-dev \
+            rsync
+          git config --global user.name "github-actions"
+          git config --global user.email "actions@github.com"
+
+      - name: 清理磁盘空间
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/local/.ghcup
+          sudo rm -rf /opt/microsoft
+          sudo apt clean
+          df -h
+
+      - name: 安装 repo 工具
+        run: |
+          mkdir -p ~/bin
+          curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod +x ~/bin/repo
+          echo "$HOME/bin" >> $GITHUB_PATH
+
+      - name: 增加 Swap 空间（防内存不足）
+        run: |
+          # 如果已有 swapfile，先停用并删除
+          if [ -f /swapfile ]; then
+            sudo swapoff /swapfile
+            sudo rm -f /swapfile
+          fi
+          # 推荐 24GB（count=24576）或至少 16GB
+          sudo dd if=/dev/zero of=/swapfile bs=1M count=24576
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          swapon --show
+          free -h
+
+      - name: 拉取 TWRP AOSP 源码
+        run: |
+          mkdir -p ~/twrp_root
+          cd ~/twrp_root
+          repo init --depth=1 -u https://github.com/TWRP-Test/platform_manifest_twrp_aosp.git -b twrp-16.0
+          repo sync -c -j$(nproc) --force-sync --no-clone-bundle --no-tags
+
+      - name: 克隆设备树到标准路径
+        run: |
+          cd ~/twrp_root
+          rm -rf device/xiaomi/nezha
+          git clone https://github.com/${{ github.repository }} device/xiaomi/nezha
+
+      - name: 执行设备树自带的完整编译脚本
+        env:
+          TWRP_TOP: /home/runner/twrp_root
+          MAKEFLAGS: -j3   # 限制make为3个并发
+          NINJA_JOBS: 3   # 限制ninja为3个并发（部分版本支持）
+          NINJA_ARGS: "-j3"   # 显式传递ninja参数
+        run: |
+          sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'   # 释放缓存
+          cd ~/twrp_root/device/xiaomi/nezha
+          bash build-recovery.sh
+
+      - name: 打包编译产物
+        run: |
+          cd ~/twrp_root/out-clean-audit/target/product/nezha 2>/dev/null || cd ~/twrp_root/out/target/product/nezha
+          if [ -f recovery.img ]; then
+            zip -j twrp-nezha-android16.zip recovery.img
+            echo "打包成功"
+          else
+            echo "未找到 recovery.img，编译失败"
+            exit 1
+          fi
+
+      - name: 上传成品到工作流附件
+        uses: actions/upload-artifact@v7
+        with:
+          name: TWRP-Nezha-Android16
+          path: ~/twrp_root/out-clean-audit/target/product/nezha/twrp-nezha-android16.zip
+          if-no-files-found: error
+
+      - name: 生成自动递增的 Tag
+        if: github.event_name == 'workflow_dispatch'
+        id: generate_tag
+        run: |
+          DATE=$(date +'%Y%m%d')
+          # 获取远程所有 tags，筛选以 TWRP-${DATE} 开头的，提取末尾两位数字
+          TAGS=$(git ls-remote --tags origin | grep -o "refs/tags/TWRP-${DATE}[0-9][0-9]$" | sed 's/.*TWRP-//' | sort)
+          if [ -z "$TAGS" ]; then
+            SEQ=1
+          else
+            # 取最大序号
+            MAX=$(echo "$TAGS" | tail -1 | sed "s/${DATE}//")
+            SEQ=$((MAX + 1))
+          fi
+          SEQ2=$(printf "%02d" $SEQ)
+          TAG="TWRP-${DATE}${SEQ2}"
+          echo "TAG=$TAG" >> $GITHUB_ENV
+          echo "Generated tag: $TAG"
+
+      - name: 发布到 GitHub Releases
+        if: github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ env.TAG }}
+          name: "小米17Ultra ${{ env.TAG }} (nezha)"
+          body: |
+            - 设备：小米 17 Ultra (nezha)
+            - 基于 twrp-16.0 分支
+            - 点击下方 Assets 下载 `twrp-nezha-android16.zip`
+          draft: false
+          prerelease: false
+          files: |
+            ~/twrp_root/out-clean-audit/target/product/nezha/twrp-nezha-android16.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
