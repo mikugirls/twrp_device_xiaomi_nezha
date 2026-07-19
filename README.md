@@ -52,6 +52,7 @@ Special thanks to:
 * The LineageOS Project
 * The Android aftermarket development community
 * Everyone who contributed code, testing, documentation, bug reports, and shared knowledge.
+* Jason for his WLAN window implementation
 
 ## License
 
