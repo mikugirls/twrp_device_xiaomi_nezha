@@ -34,6 +34,7 @@ PRODUCT_PROPERTY_OVERRIDES += persist.sys.fuse.passthrough.enable=true
 # Recovery init
 PRODUCT_COPY_FILES += \
     $(DEVICE_PATH)/twrp.flags:recovery/root/system/etc/twrp.flags \
+    system/core/libprocessgroup/profiles/task_profiles.json:recovery/root/system/etc/task_profiles.json \
     $(DEVICE_PATH)/recovery/root/init.recovery.qcom.rc:recovery/root/init.recovery.qcom.rc \
     $(DEVICE_PATH)/recovery/root/init.recovery.wifi.rc:recovery/root/init.recovery.wifi.rc \
     $(DEVICE_PATH)/recovery/root/init.recovery.usb.rc:recovery/root/init.recovery.usb.rc \
