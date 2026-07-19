@@ -1,4 +1,6 @@
-on property:twrp.super.symlinks_created=true && property:recovery.nezha.security_firmware_ready=1
+# Mounting the stock partitions hides recovery's ramdisk crypto helpers, so
+# keep WLAN behind the completed decryption preparation chain.
+on property:twrp.super.symlinks_created=true && property:recovery.nezha.security_firmware_ready=1 && property:crypto.ready=1
     start nezha-wlan-setup
 
 on property:supplicant.status=running
