@@ -1,0 +1,260 @@
+--- a/gui/action.cpp
++++ b/gui/action.cpp
+@@ -35,6 +35,8 @@
+ #include <private/android_filesystem_config.h>
+ #include <android-base/properties.h>
+ #include <fstream>
++#include <iomanip>
++#include <openssl/evp.h>
+ 
+ #include <string>
+ #include <sstream>
+@@ -255,8 +257,7 @@
+ #endif
+ 		ADD_ACTION(mergesnapshots);
+ #ifndef TW_NO_NETWORK
+-        ADD_ACTION(wlanstart);
+-        ADD_ACTION(wlanstop);
++        ADD_ACTION(wlanrestart);
+         ADD_ACTION(wlanscan);
+         ADD_ACTION(wlanconnect);
+         ADD_ACTION(wlangetstatus);
+@@ -2405,36 +2406,23 @@
+     return s_wlanLogBox;
+ }
+ 
+-int GUIAction::wlanstart(string arg __unused) {
++int GUIAction::wlanrestart(string arg __unused) {
+ 	GUIBorderedLogBox* logBox = FindWlanLogBox();
+-	int result = TWFunc::Exec_Cmd("setprop supplicant.status running");
+ 	if (logBox) {
+-		logBox->AddLogLine("[INFO] Starting WLAN service...", "normal");
+-		if (result == 0) {
+-			logBox->AddLogLine("[INFO] WLAN service start requested", "normal");
+-		} else {
+-			logBox->AddLogLine("[ERROR] Failed to start WLAN service", "error");
+-		}
++		logBox->AddLogLine("[INFO] Restarting WLAN...", "normal");
+ 		gui_forceRender();
+ 	} else {
+ 		LOGERR("WLAN log box not found\n");
+ 	}
+-	return result;
+-}
+ 
+-int GUIAction::wlanstop(string arg __unused) {
+-	GUIBorderedLogBox* logBox = FindWlanLogBox();
+-	int result = TWFunc::Exec_Cmd("setprop supplicant.status stopped");
++	int result = TWFunc::Exec_Cmd("/system/bin/nezha-wlan-control.sh restart");
+ 	if (logBox) {
+-		logBox->AddLogLine("[INFO] Stopping WLAN service...", "normal");
+ 		if (result == 0) {
+-			logBox->AddLogLine("[INFO] WLAN service stop requested", "normal");
++			logBox->AddLogLine("[INFO] WLAN is ready", "normal");
+ 		} else {
+-			logBox->AddLogLine("[ERROR] Failed to stop WLAN service", "error");
++			logBox->AddLogLine("[ERROR] WLAN restart failed", "error");
+ 		}
+ 		gui_forceRender();
+-	} else {
+-		LOGERR("WLAN log box not found\n");
+ 	}
+ 	return result;
+ }
+@@ -2645,6 +2633,35 @@
+     return out;
+ }
+ 
++static std::string shell_quote(const std::string& value) {
++    std::string quoted = "'";
++    for (char c : value) {
++        if (c == '\'') {
++            quoted += "'\\''";
++        } else {
++            quoted += c;
++        }
++    }
++    quoted += "'";
++    return quoted;
++}
++
++static std::string derive_wpa_psk(const std::string& ssid, const std::string& password) {
++    uint8_t psk[32];
++    if (!PKCS5_PBKDF2_HMAC_SHA1(password.c_str(), password.size(),
++            reinterpret_cast<const uint8_t*>(ssid.data()), ssid.size(), 4096,
++            sizeof(psk), psk)) {
++        return "";
++    }
++
++    std::ostringstream result;
++    result << std::hex << std::setfill('0');
++    for (uint8_t byte : psk) {
++        result << std::setw(2) << static_cast<unsigned int>(byte);
++    }
++    return result.str();
++}
++
+ static std::string run_command_get_output_debug(GUIBorderedLogBox* logBox, const std::string &cmd) {
+     if (logBox) {
+         logBox->AddLogLine("[DEBUG] Executing: " + cmd, "normal");
+@@ -2700,8 +2717,9 @@
+     // 读取选中的 WLAN
+     std::string selectedWlan = DataManager::GetStrValue("tw_selected_wlan");
+     if (selectedWlan.empty()) {
+-        selectedWlan = "MyHomeWiFi";
+-        LOGINFO("[DEBUG] SelectedWlan empty, using fallback MyHomeWiFi\n");
++        logBox->AddLogLine("[ERROR] No WLAN network selected", "error");
++        gui_forceRender();
++        return -1;
+     }
+ 
+     // 获取密码
+@@ -2726,12 +2744,13 @@
+     const char* CTRL_DIR = "/tmp/recovery/sockets";
+     const char* WPACLI = "wpa_cli";
+ 
+-    // 先移除 network 0，保证干净
+-    run_command_get_output(std::string(WPACLI) + " -i" + IFACE + " -p" + CTRL_DIR + " remove_network 0");
++    // Keep one selected network so it can be persisted and reconnected later.
++    run_command_get_output(std::string(WPACLI) + " -i" + IFACE + " -p" + CTRL_DIR + " remove_network all");
+     run_command_get_output(std::string(WPACLI) + " -i" + IFACE + " -p" + CTRL_DIR + " add_network");
+ 
+     // 设置 SSID
+-    std::string cmd_set_ssid = std::string(WPACLI) + " -i" + IFACE + " -p" + CTRL_DIR + " set_network 0 ssid '\"" + selectedWlan + "\"'";
++    std::string cmd_set_ssid = std::string(WPACLI) + " -i" + IFACE + " -p" + CTRL_DIR
++            + " set_network 0 ssid " + shell_quote("\"" + selectedWlan + "\"");
+     run_command_get_output(cmd_set_ssid);
+ 
+     // ========= 根据加密方式设置 key_mgmt =========
+@@ -2762,8 +2781,21 @@
+         if (encryption == "Open") {
+             logBox->AddLogLine("[WARNING] Open network should not have password, ignoring password", "warning");
+         } else {
+-            uint8_t psk[32];
+-			std::string cmd_set_psk = std::string(WPACLI) + " -i" + IFACE + " -p" + CTRL_DIR + " set_network 0 psk '\"" + password + "\"'";
++            std::string psk_value;
++            if (encryption == "WPA3") {
++                // SAE needs the reusable password; the persisted file is root-only.
++                psk_value = shell_quote("\"" + password + "\"");
++            } else {
++                std::string derived_psk = derive_wpa_psk(selectedWlan, password);
++                if (derived_psk.empty()) {
++                    logBox->AddLogLine("[ERROR] Failed to derive the network key", "error");
++                    gui_forceRender();
++                    return -1;
++                }
++                psk_value = derived_psk;
++            }
++			std::string cmd_set_psk = std::string(WPACLI) + " -i" + IFACE + " -p" + CTRL_DIR
++                    + " set_network 0 psk " + psk_value;
+             run_command_get_output(cmd_set_psk);
+         }
+     } else {
+@@ -2801,16 +2833,27 @@
+         return -1;
+     }
+ 
+-    // 请求 IP
+-    logBox->AddLogLine("[INFO] Wi-Fi link established, requesting IP with dhcpcd...", "normal");
++    int save_result = TWFunc::Exec_Cmd("/system/bin/nezha-wlan-control.sh save");
++    if (save_result == 0) {
++        logBox->AddLogLine("[INFO] Network saved for automatic reconnection", "normal");
++    } else {
++        logBox->AddLogLine("[WARNING] Connected, but the network could not be saved", "warning");
++    }
++
++    // The WLAN monitor requests DHCP for both manual and automatic connections.
++    logBox->AddLogLine("[INFO] Wi-Fi link established, waiting for an IP address...", "normal");
+     gui_forceRender();
+-    run_command_get_output("dhcpcd wlan0");
+-    ::sleep(5); // 等 dhcpcd 配置完成
+ 
+     // 获取 IP 地址
+-    std::string ip_address = run_command_get_output("ifconfig wlan0 | grep 'inet ' | awk -F'[: ]+' '{print $4}'");
+-    while (!ip_address.empty() && (ip_address.back() == '\n' || ip_address.back() == '\r'))
+-        ip_address.pop_back();
++    std::string ip_address;
++    for (int i = 0; i < 10 && ip_address.empty(); ++i) {
++        ip_address = run_command_get_output("ifconfig wlan0 | grep 'inet ' | awk -F'[: ]+' '{print $4}'");
++        while (!ip_address.empty() && (ip_address.back() == '\n' || ip_address.back() == '\r'))
++            ip_address.pop_back();
++        if (ip_address.empty()) {
++            ::sleep(1);
++        }
++    }
+ 
+     // 获取网关
+     std::string gateway = run_command_get_output("netstat -rn | grep wlan0 | grep UG | awk '{print $2}'");
+--- a/gui/objects.hpp
++++ b/gui/objects.hpp
+@@ -380,8 +380,7 @@
+ 	int changeterminal(std::string arg);
+ 	int applycustomtwrpfolder(std::string arg);
+ 	int mergesnapshots(std::string arg);
+-	int wlanstart(std::string arg);
+-	int wlanstop(std::string arg);
++	int wlanrestart(std::string arg);
+ 	int wlanscan(std::string arg);
+ 	int wlanconnect(std::string arg);
+ 	int wlangetstatus(std::string arg);
+--- a/gui/theme/common/portrait.xml
++++ b/gui/theme/common/portrait.xml
+@@ -3944,19 +3944,11 @@
+ 				</actions>
+ 			</button>
+ 
+-			<button style="main_button_half_height">
++			<button style="main_button_half_height_full_width">
+ 				<condition var1="tw_disable_network" var2="0"/>
+ 				<placement x="%indent%" y="%row21a_y%"/>
+-				<text>{@wlan_stop_service_btn=Stop Service}</text>
+-				<action function="wlanstop"/>
+-			</button>
+-
+-			<button style="main_button_half_height">
+-				<condition var1="tw_disable_network" var2="0"/>
+-				<placement x="%center_x%" y="%row21a_y%"/>
+-				<text>{@wlan_start_service_btn=Start Service}</text>
+-				<action function="cmd">wpa_cli -iwlan0 -p/tmp/recovery/sockets add_network</action>
+-				<action function="wlanstart"/>
++				<text>{@wlan_restart_btn=Restart WLAN}</text>
++				<action function="wlanrestart"/>
+ 			</button>
+ 
+ 			<action>
+--- a/gui/theme/common/languages/en.xml
++++ b/gui/theme/common/languages/en.xml
+@@ -790,8 +790,7 @@
+ 		<string name="wlan_test_network_btn">Test Network</string>
+ 		<string name="wlan_scan_btn">Scan</string>
+ 		<string name="wlan_connect_btn">Connect</string>
+-		<string name="wlan_stop_service_btn">Stop Service</string>
+-		<string name="wlan_start_service_btn">Start Service</string>
++		<string name="wlan_restart_btn">Restart WLAN</string>
+ 		<string name="select_wlan_hdr">Select WLAN to Connect</string>
+ 		<string name="next_btn">Next</string>
+ 	</resources>
+--- a/gui/theme/extra-languages/languages/zh_CN.xml
++++ b/gui/theme/extra-languages/languages/zh_CN.xml
+@@ -782,8 +782,7 @@
+ 		<string name="wlan_test_network_btn">测试网络</string>
+ 		<string name="wlan_scan_btn">扫描</string>
+ 		<string name="wlan_connect_btn">连接</string>
+-		<string name="wlan_stop_service_btn">停止服务</string>
+-		<string name="wlan_start_service_btn">启动服务</string>
++		<string name="wlan_restart_btn">重启 WLAN</string>
+ 		<string name="select_wlan_hdr">选择需要连接的WiFi</string>
+ 		<string name="next_btn">下一步</string>
+ 	</resources>
+--- a/gui/theme/extra-languages/languages/zh_TW.xml
++++ b/gui/theme/extra-languages/languages/zh_TW.xml
+@@ -791,8 +791,7 @@
+ 		<string name="wlan_test_network_btn">測試網路</string>
+ 		<string name="wlan_scan_btn">掃描</string>
+ 		<string name="wlan_connect_btn">連線</string>
+-		<string name="wlan_stop_service_btn">停止服務</string>
+-		<string name="wlan_start_service_btn">啟動服務</string>
++		<string name="wlan_restart_btn">重新啟動 WLAN</string>
+ 		<string name="select_wlan_hdr">選擇要連線的 WLAN</string>
+ 		<string name="next_btn">下一步</string>
+ 	</resources>

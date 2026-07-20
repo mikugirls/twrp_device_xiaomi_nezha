@@ -1,0 +1,366 @@
+diff --git a/gui/action.cpp b/gui/action.cpp
+index 6fd5894..be5d1a8 100644
+--- a/gui/action.cpp
++++ b/gui/action.cpp
+@@ -218,6 +218,10 @@ GUIAction::GUIAction(xml_node<>* node)
+ 		ADD_ACTION(enablefastboot);
+ 		ADD_ACTION(changeterminal);
+ 		ADD_ACTION(unmapsuperdevices);
++#ifndef TW_NO_NETWORK
++		// Scanning must finish before a following overlay action reads its list.
++		ADD_ACTION(wlanscan);
++#endif
+ 
+ 		// remember actions that run in the caller thread
+ 		for (mapFunc::const_iterator it = mf.begin(); it != mf.end(); ++it)
+@@ -258,7 +262,6 @@ GUIAction::GUIAction(xml_node<>* node)
+ 		ADD_ACTION(mergesnapshots);
+ #ifndef TW_NO_NETWORK
+         ADD_ACTION(wlanrestart);
+-        ADD_ACTION(wlanscan);
+         ADD_ACTION(wlanconnect);
+         ADD_ACTION(wlangetstatus);
+         ADD_ACTION(wlantest);
+@@ -2466,8 +2469,39 @@ int GUIAction::wlanscan(std::string arg __unused) {
+         }
+     }
+ 
+-    // 给扫描一点时间（1 秒）
+-    usleep(1000 * 1000);
++    // A scan may take longer than one second. Wait until supplicant reports
++    // that the scan has completed instead of reading an empty result set.
++    bool saw_scanning = false;
++    bool scan_completed = false;
++    for (int i = 0; i < 40; ++i) {
++        std::string command = std::string(WPACLI) + " -i" + IFACE + " -p" + CTRL_DIR + " status";
++        FILE* fp = popen(command.c_str(), "r");
++        std::string status;
++        if (fp) {
++            char buf[512];
++            while (fgets(buf, sizeof(buf), fp) != nullptr) status += buf;
++            pclose(fp);
++        }
++
++        if (status.find("wpa_state=SCANNING") != std::string::npos) {
++            saw_scanning = true;
++        } else if (saw_scanning) {
++            scan_completed = true;
++            break;
++        } else if (i == 9) {
++            break;
++        }
++        usleep(200 * 1000);
++    }
++    // If the scan completed before the first status poll, it is already safe
++    // to read the cache after this short grace period.
++    if (!saw_scanning) {
++        usleep(400 * 1000);
++        scan_completed = true;
++    }
++    if (!scan_completed) {
++        logBox->AddLogLine("[WARNING] Scan completion timed out; showing available cached results", "warning");
++    }
+ 
+     // ========= 2. 执行 scan_results =========
+     std::vector<std::string> lines;
+@@ -2492,12 +2526,6 @@ int GUIAction::wlanscan(std::string arg __unused) {
+         pclose(fp);
+     }
+ 
+-    if (lines.size() <= 1) {
+-        logBox->AddLogLine("[INFO] No networks found", "normal");
+-        gui_forceRender();
+-        return 0;
+-    }
+-
+     // ========= 3. 辅助函数 =========
+     auto decode_hex_escaped = [](const std::string& s) -> std::string {
+         std::string out;
+@@ -2535,7 +2563,42 @@ int GUIAction::wlanscan(std::string arg __unused) {
+         s = s.substr(start, end - start);
+     };
+ 
++    struct SavedNetwork {
++        std::string id;
++        std::string ssid;
++        std::string flags;
++    };
++    std::vector<SavedNetwork> saved_networks;
++    {
++        std::string command = std::string(WPACLI) + " -i" + IFACE + " -p" + CTRL_DIR + " list_networks";
++        FILE* fp = popen(command.c_str(), "r");
++        if (fp) {
++            char buf[1024];
++            bool header = true;
++            while (fgets(buf, sizeof(buf), fp) != nullptr) {
++                if (header) {
++                    header = false;
++                    continue;
++                }
++                std::string line(buf);
++                while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
++                size_t tab1 = line.find('\t');
++                size_t tab2 = tab1 == std::string::npos ? tab1 : line.find('\t', tab1 + 1);
++                size_t tab3 = tab2 == std::string::npos ? tab2 : line.find('\t', tab2 + 1);
++                if (tab1 == std::string::npos || tab2 == std::string::npos) continue;
++
++                SavedNetwork network;
++                network.id = line.substr(0, tab1);
++                network.ssid = decode_hex_escaped(line.substr(tab1 + 1, tab2 - tab1 - 1));
++                if (tab3 != std::string::npos) network.flags = line.substr(tab3 + 1);
++                if (!network.ssid.empty()) saved_networks.push_back(network);
++            }
++            pclose(fp);
++        }
++    }
++
+     std::vector<GUIWlanList::WlanItem> wlanList;
++    std::set<std::string> visible_ssids;
+     int count = 0;
+ 
+     // ========= 4. 解析每一行 =========
+@@ -2605,14 +2668,44 @@ int GUIAction::wlanscan(std::string arg __unused) {
+         item.ssid       = ssid;
+         item.signal     = signal + " dBm";
+         item.encryption = encryption;
++        item.network_id = "";
++        item.saved      = false;
++        for (const SavedNetwork& saved : saved_networks) {
++            if (saved.ssid == ssid) {
++                item.network_id = saved.id;
++                item.saved = true;
++                break;
++            }
++        }
+         item.selected   = false;
+         wlanList.push_back(item);
++        visible_ssids.insert(ssid);
++    }
++
++    // Keep saved networks visible even when they are currently out of range.
++    for (const SavedNetwork& saved : saved_networks) {
++        if (visible_ssids.find(saved.ssid) != visible_ssids.end()) continue;
++        GUIWlanList::WlanItem item;
++        item.ssid = saved.ssid;
++        item.signal = "Not in range";
++        item.encryption = "Saved";
++        item.network_id = saved.id;
++        item.saved = true;
++        item.selected = false;
++        wlanList.push_back(item);
++    }
++
++    if (wlanList.empty()) {
++        logBox->AddLogLine("[INFO] No networks found", "normal");
+     }
+ 
+     // ========= 5. 汇总 & 通知 UI =========
+     {
+         std::ostringstream oss;
+         oss << "[INFO] Found " << count << " networks";
++        if (!saved_networks.empty()) {
++            oss << " (" << saved_networks.size() << " saved)";
++        }
+         logBox->AddLogLine(oss.str(), "normal");
+         logBox->AddLogLine("[INFO] Scan completed", "normal");
+     }
+@@ -2728,12 +2821,16 @@ int GUIAction::wlanconnect(std::string arg __unused) {
+ 
+     // 获取选中的WLAN的加密方式
+     std::string encryption = DataManager::GetStrValue("tw_selected_wlan_encryption");
++    std::string network_id = DataManager::GetStrValue("tw_selected_wlan_id");
++    bool selected_saved = DataManager::GetStrValue("tw_selected_wlan_saved") == "1";
+     
+     logBox->AddLogLine("[INFO] Connecting to network...", "normal");
+     logBox->AddLogLine("[INFO] SSID: " + selectedWlan, "normal");
+     logBox->AddLogLine("[INFO] Encryption: " + encryption, "normal");
+     
+-    if (!password.empty()) {
++    if (selected_saved) {
++        logBox->AddLogLine("[INFO] Using saved credentials", "normal");
++    } else if (!password.empty()) {
+         logBox->AddLogLine("[INFO] Using password authentication", "normal");
+     } else {
+         logBox->AddLogLine("[INFO] No password provided (open network)", "normal");
+@@ -2744,14 +2841,30 @@ int GUIAction::wlanconnect(std::string arg __unused) {
+     const char* CTRL_DIR = "/tmp/recovery/sockets";
+     const char* WPACLI = "wpa_cli";
+ 
+-    // Keep one selected network so it can be persisted and reconnected later.
+-    run_command_get_output(std::string(WPACLI) + " -i" + IFACE + " -p" + CTRL_DIR + " remove_network all");
+-    run_command_get_output(std::string(WPACLI) + " -i" + IFACE + " -p" + CTRL_DIR + " add_network");
++    if (selected_saved) {
++        if (network_id.empty()) {
++            logBox->AddLogLine("[ERROR] Saved network ID is unavailable; scan again", "error");
++            gui_forceRender();
++            return -1;
++        }
++        run_command_get_output(std::string(WPACLI) + " -i" + IFACE + " -p" + CTRL_DIR
++                + " enable_network " + network_id);
++        run_command_get_output(std::string(WPACLI) + " -i" + IFACE + " -p" + CTRL_DIR
++                + " select_network " + network_id);
++    } else {
++        std::string add_reply = run_command_get_output(std::string(WPACLI) + " -i" + IFACE + " -p" + CTRL_DIR + " add_network");
++        while (!add_reply.empty() && (add_reply.back() == '\n' || add_reply.back() == '\r')) add_reply.pop_back();
++        if (add_reply.empty() || add_reply.find("FAIL") != std::string::npos) {
++            logBox->AddLogLine("[ERROR] Failed to create WLAN configuration", "error");
++            gui_forceRender();
++            return -1;
++        }
++        network_id = add_reply;
+ 
+-    // 设置 SSID
+-    std::string cmd_set_ssid = std::string(WPACLI) + " -i" + IFACE + " -p" + CTRL_DIR
+-            + " set_network 0 ssid " + shell_quote("\"" + selectedWlan + "\"");
+-    run_command_get_output(cmd_set_ssid);
++        // Set SSID for this new entry without deleting any previously saved networks.
++        std::string cmd_set_ssid = std::string(WPACLI) + " -i" + IFACE + " -p" + CTRL_DIR
++                + " set_network " + network_id + " ssid " + shell_quote("\"" + selectedWlan + "\"");
++        run_command_get_output(cmd_set_ssid);
+ 
+     // ========= 根据加密方式设置 key_mgmt =========
+     std::string key_mgmt;
+@@ -2773,18 +2886,21 @@ int GUIAction::wlanconnect(std::string arg __unused) {
+         logBox->AddLogLine("[INFO] Using default WPA-PSK authentication", "normal");
+     }
+ 
+-    std::string cmd_set_key_mgmt = std::string(WPACLI) + " -i" + IFACE + " -p" + CTRL_DIR + " set_network 0 key_mgmt " + key_mgmt;
+-    run_command_get_output(cmd_set_key_mgmt);
++        std::string cmd_set_key_mgmt = std::string(WPACLI) + " -i" + IFACE + " -p" + CTRL_DIR
++                + " set_network " + network_id + " key_mgmt " + key_mgmt;
++        run_command_get_output(cmd_set_key_mgmt);
+ 
+     // 设置 PSK（仅当需要密码时）
+-    if (!password.empty()) {
++        if (!password.empty()) {
+         if (encryption == "Open") {
+             logBox->AddLogLine("[WARNING] Open network should not have password, ignoring password", "warning");
+         } else {
+-            std::string psk_value;
+             if (encryption == "WPA3") {
+-                // SAE needs the reusable password; the persisted file is root-only.
+-                psk_value = shell_quote("\"" + password + "\"");
++                // SAE passwords may be shorter than WPA-PSK passphrases.
++                std::string cmd_set_sae_password = std::string(WPACLI) + " -i" + IFACE + " -p" + CTRL_DIR
++                        + " set_network " + network_id + " sae_password "
++                        + shell_quote("\"" + password + "\"");
++                run_command_get_output(cmd_set_sae_password);
+             } else {
+                 std::string derived_psk = derive_wpa_psk(selectedWlan, password);
+                 if (derived_psk.empty()) {
+@@ -2792,11 +2908,10 @@ int GUIAction::wlanconnect(std::string arg __unused) {
+                     gui_forceRender();
+                     return -1;
+                 }
+-                psk_value = derived_psk;
++                std::string cmd_set_psk = std::string(WPACLI) + " -i" + IFACE + " -p" + CTRL_DIR
++                        + " set_network " + network_id + " psk " + derived_psk;
++                run_command_get_output(cmd_set_psk);
+             }
+-			std::string cmd_set_psk = std::string(WPACLI) + " -i" + IFACE + " -p" + CTRL_DIR
+-                    + " set_network 0 psk " + psk_value;
+-            run_command_get_output(cmd_set_psk);
+         }
+     } else {
+         if (encryption != "Open") {
+@@ -2808,10 +2923,13 @@ int GUIAction::wlanconnect(std::string arg __unused) {
+                 return -1;
+             }
+         }
+-    }
++        }
+ 
+-    // 启用 network 0
+-    run_command_get_output(std::string(WPACLI) + " -i" + IFACE + " -p" + CTRL_DIR + " enable_network 0");
++        run_command_get_output(std::string(WPACLI) + " -i" + IFACE + " -p" + CTRL_DIR
++                + " enable_network " + network_id);
++        run_command_get_output(std::string(WPACLI) + " -i" + IFACE + " -p" + CTRL_DIR
++                + " select_network " + network_id);
++    }
+ 
+     logBox->AddLogLine("[INFO] Authenticating...", "normal");
+     gui_forceRender();
+@@ -2833,6 +2951,10 @@ int GUIAction::wlanconnect(std::string arg __unused) {
+         return -1;
+     }
+ 
++    // select_network temporarily disables other entries. Re-enable all saved
++    // networks so supplicant can automatically choose any one in range later.
++    run_command_get_output(std::string(WPACLI) + " -i" + IFACE + " -p" + CTRL_DIR + " enable_network all");
++
+     int save_result = TWFunc::Exec_Cmd("/system/bin/nezha-wlan-control.sh save");
+     if (save_result == 0) {
+         logBox->AddLogLine("[INFO] Network saved for automatic reconnection", "normal");
+diff --git a/gui/objects.hpp b/gui/objects.hpp
+index 0f4fea8..9919a85 100644
+--- a/gui/objects.hpp
++++ b/gui/objects.hpp
+@@ -742,6 +742,8 @@ public:
+ 		std::string ssid;
+ 		std::string signal;
+ 		std::string encryption;
++		std::string network_id;
++		bool saved;
+ 		bool selected;
+ 	};
+ 
+diff --git a/gui/theme/common/portrait.xml b/gui/theme/common/portrait.xml
+index 725fbac..c4eb730 100755
+--- a/gui/theme/common/portrait.xml
++++ b/gui/theme/common/portrait.xml
+@@ -1252,9 +1252,21 @@
+ 
+ 		<page name="wlan_password">
+ 		    <template name="page"/>
++
++		    <action>
++		        <condition var1="tw_selected_wlan_saved" op="=" var2="1"/>
++		        <actions>
++		            <action function="set">tw_wlan_password=</action>
++					<action function="page">wlan</action>
++					<action function="wlanconnect"/>
++		        </actions>
++		    </action>
+ 		
+ 		    <action>
+-		        <condition var1="tw_selected_wlan_encryption" op="=" var2="Open"/>
++		        <conditions>
++		            <condition var1="tw_selected_wlan_saved" op="!=" var2="1"/>
++		            <condition var1="tw_selected_wlan_encryption" op="=" var2="Open"/>
++		        </conditions>
+ 		        <actions>
+ 		            <action function="set">tw_wlan_password=</action>
+ 					<action function="page">wlan</action>
+diff --git a/gui/wlanlist.cpp b/gui/wlanlist.cpp
+index 1588072..f751b20 100644
+--- a/gui/wlanlist.cpp
++++ b/gui/wlanlist.cpp
+@@ -147,6 +147,8 @@ void GUIWlanList::SetPageFocus(int inFocus)
+ 			if (!mVariable.empty()) {
+ 				DataManager::SetValue(mVariable, mList.at(0).ssid);
+ 				DataManager::SetValue("tw_selected_wlan_encryption", mList.at(0).encryption);
++				DataManager::SetValue("tw_selected_wlan_id", mList.at(0).network_id);
++				DataManager::SetValue("tw_selected_wlan_saved", mList.at(0).saved ? "1" : "0");
+ 			}
+ 		}
+ 		mUpdate = 1;
+@@ -165,6 +167,9 @@ void GUIWlanList::RenderItem(size_t itemindex, int yPos, bool selected)
+ 
+ 	ImageResource* icon = mList.at(itemindex).selected ? mIconSelected : mIconUnselected;
+ 	std::string text = mList.at(itemindex).ssid;
++	if (mList.at(itemindex).saved) {
++		text += " [Saved]";
++	}
+ 	if (!mList.at(itemindex).signal.empty()) {
+ 		text += " (" + mList.at(itemindex).signal + ")";
+ 	}
+@@ -188,6 +193,7 @@ void GUIWlanList::NotifySelect(size_t item_selected)
+ 		DataManager::SetValue(mVariable, mList.at(item_selected).ssid);
+ 		// Also save encryption type for password page
+ 		DataManager::SetValue("tw_selected_wlan_encryption", mList.at(item_selected).encryption);
++		DataManager::SetValue("tw_selected_wlan_id", mList.at(item_selected).network_id);
++		DataManager::SetValue("tw_selected_wlan_saved", mList.at(item_selected).saved ? "1" : "0");
+ 	}
+ }
+-
+

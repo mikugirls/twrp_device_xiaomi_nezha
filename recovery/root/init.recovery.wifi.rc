@@ -3,12 +3,6 @@
 on property:twrp.super.symlinks_created=true && property:recovery.nezha.security_firmware_ready=1 && property:crypto.ready=1
     start nezha-wlan-setup
 
-on property:supplicant.status=running
-    start nezha-wpa-supplicant
-
-on property:supplicant.status=stopped
-    stop nezha-wpa-supplicant
-
 service nezha-wlan-setup /system/bin/nezha-wlan-setup.sh
     user root
     group root system inet net_admin wifi
@@ -17,11 +11,27 @@ service nezha-wlan-setup /system/bin/nezha-wlan-setup.sh
     oneshot
     seclabel u:r:recovery:s0
 
-service nezha-wpa-supplicant /vendor/bin/hw/wpa_supplicant -Dnl80211 -iwlan0 -dd -O/tmp/recovery/sockets -c/vendor/etc/wifi/wpa_supplicant.conf
+service nezha-wlan-autostart /system/bin/nezha-wlan-control.sh start
+    user root
+    group root system inet net_admin wifi
+    capabilities CHOWN DAC_OVERRIDE FOWNER NET_ADMIN NET_RAW
+    disabled
+    oneshot
+    seclabel u:r:recovery:s0
+
+service nezha-wpa-supplicant /vendor/bin/hw/wpa_supplicant -Dnl80211 -iwlan0 -dd -O/tmp/recovery/sockets -c/tmp/recovery/wpa_supplicant.conf
     interface aidl android.hardware.wifi.supplicant.ISupplicant/default
     interface aidl vendor.qti.hardware.wifi.supplicant.ISupplicantVendor/default
     user root
     group root system inet net_admin wifi
+    disabled
+    oneshot
+    seclabel u:r:recovery:s0
+
+service nezha-wlan-monitor /system/bin/nezha-wlan-control.sh monitor
+    user root
+    group root system inet net_admin wifi
+    capabilities NET_ADMIN NET_RAW
     disabled
     oneshot
     seclabel u:r:recovery:s0

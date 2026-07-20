@@ -1,0 +1,280 @@
+ gui/action.cpp                                | 101 ++++++++++++++++++++++++++
+ gui/objects.hpp                               |   2 +
+ gui/theme/common/languages/en.xml             |   4 +
+ gui/theme/common/portrait.xml                 |  71 +++++++++++++++++-
+ gui/theme/extra-languages/languages/zh_CN.xml |   4 +
+ gui/theme/extra-languages/languages/zh_TW.xml |   4 +
+ 6 files changed, 185 insertions(+), 1 deletion(-)
+diff --git a/gui/action.cpp b/gui/action.cpp
+index be5d1a8..bd0b394 100644
+--- a/gui/action.cpp
++++ b/gui/action.cpp
+@@ -221,6 +221,8 @@ GUIAction::GUIAction(xml_node<>* node)
+ #ifndef TW_NO_NETWORK
+ 		// Scanning must finish before a following overlay action reads its list.
+ 		ADD_ACTION(wlanscan);
++		ADD_ACTION(wlanlistsaved);
++		ADD_ACTION(wlanforget);
+ #endif
+ 
+ 		// remember actions that run in the caller thread
+@@ -2726,6 +2728,105 @@ static std::string run_command_get_output(const std::string &cmd){
+     return out;
+ }
+ 
++int GUIAction::wlanlistsaved(std::string arg __unused) {
++    GUIBorderedLogBox* logBox = FindWlanLogBox();
++    std::vector<GUIWlanList::WlanItem> wlanList;
++    std::string output = run_command_get_output(
++            "wpa_cli -iwlan0 -p/tmp/recovery/sockets list_networks");
++    std::istringstream stream(output);
++    std::string line;
++    bool header = true;
++
++    auto decode_hex_escaped = [](const std::string& value) {
++        std::string decoded;
++        for (size_t i = 0; i < value.size();) {
++            if (i + 3 < value.size() && value[i] == '\\' && value[i + 1] == 'x') {
++                auto hex_value = [](char c) {
++                    if (c >= '0' && c <= '9') return c - '0';
++                    if (c >= 'a' && c <= 'f') return 10 + c - 'a';
++                    if (c >= 'A' && c <= 'F') return 10 + c - 'A';
++                    return -1;
++                };
++                int high = hex_value(value[i + 2]);
++                int low = hex_value(value[i + 3]);
++                if (high >= 0 && low >= 0) {
++                    decoded.push_back(static_cast<char>((high << 4) | low));
++                    i += 4;
++                    continue;
++                }
++            }
++            decoded.push_back(value[i++]);
++        }
++        return decoded;
++    };
++
++    while (std::getline(stream, line)) {
++        if (header) {
++            header = false;
++            continue;
++        }
++        while (!line.empty() && line.back() == '\r') line.pop_back();
++        size_t tab1 = line.find('\t');
++        size_t tab2 = tab1 == std::string::npos ? tab1 : line.find('\t', tab1 + 1);
++        if (tab1 == std::string::npos || tab2 == std::string::npos) continue;
++
++        GUIWlanList::WlanItem item;
++        item.network_id = line.substr(0, tab1);
++        item.ssid = decode_hex_escaped(line.substr(tab1 + 1, tab2 - tab1 - 1));
++        if (item.ssid.empty()) continue;
++        item.signal = "";
++        item.encryption = "Saved";
++        item.saved = true;
++        item.selected = false;
++        wlanList.push_back(item);
++    }
++
++    SetWlanList(wlanList);
++    DataManager::SetValue("tw_wlan_saved_count", std::to_string(wlanList.size()));
++    DataManager::SetValue("tw_wlan_list_update", "0");
++    DataManager::SetValue("tw_wlan_list_update", "1");
++    if (wlanList.empty()) {
++        DataManager::SetValue("tw_selected_wlan", "");
++        DataManager::SetValue("tw_selected_wlan_id", "");
++        DataManager::SetValue("tw_selected_wlan_saved", "0");
++        if (logBox) logBox->AddLogLine("[INFO] No saved WLAN networks", "normal");
++    }
++    gui_forceRender();
++    return 0;
++}
++
++int GUIAction::wlanforget(std::string arg __unused) {
++    GUIBorderedLogBox* logBox = FindWlanLogBox();
++    std::string network_id = DataManager::GetStrValue("tw_selected_wlan_id");
++    std::string ssid = DataManager::GetStrValue("tw_selected_wlan");
++    if (network_id.empty() || network_id.find_first_not_of("0123456789") != std::string::npos) {
++        if (logBox) logBox->AddLogLine("[ERROR] No saved WLAN network selected", "error");
++        gui_forceRender();
++        return -1;
++    }
++
++    std::string reply = run_command_get_output(
++            "wpa_cli -iwlan0 -p/tmp/recovery/sockets remove_network " + network_id);
++    if (reply.find("OK") == std::string::npos) {
++        if (logBox) logBox->AddLogLine("[ERROR] Failed to remove saved WLAN network", "error");
++        gui_forceRender();
++        return -1;
++    }
++    if (TWFunc::Exec_Cmd("/system/bin/nezha-wlan-control.sh save") != 0) {
++        if (logBox) logBox->AddLogLine("[ERROR] Removed network in memory, but failed to persist it", "error");
++        gui_forceRender();
++        return -1;
++    }
++
++    if (logBox) logBox->AddLogLine("[INFO] Forgot saved WLAN: " + ssid, "normal");
++    DataManager::SetValue("tw_selected_wlan", "");
++    DataManager::SetValue("tw_selected_wlan_id", "");
++    DataManager::SetValue("tw_selected_wlan_saved", "0");
++    wlanlistsaved("");
++    gui_forceRender();
++    return 0;
++}
++
+ static std::string shell_quote(const std::string& value) {
+     std::string quoted = "'";
+     for (char c : value) {
+diff --git a/gui/objects.hpp b/gui/objects.hpp
+index 9919a85..490864d 100644
+--- a/gui/objects.hpp
++++ b/gui/objects.hpp
+@@ -382,6 +382,8 @@ protected:
+ 	int mergesnapshots(std::string arg);
+ 	int wlanrestart(std::string arg);
+ 	int wlanscan(std::string arg);
++	int wlanlistsaved(std::string arg);
++	int wlanforget(std::string arg);
+ 	int wlanconnect(std::string arg);
+ 	int wlangetstatus(std::string arg);
+ 	int wlantest(std::string arg);
+diff --git a/gui/theme/common/languages/en.xml b/gui/theme/common/languages/en.xml
+index 4646538..aa49f2a 100755
+--- a/gui/theme/common/languages/en.xml
++++ b/gui/theme/common/languages/en.xml
+@@ -791,6 +791,10 @@
+ 		<string name="wlan_scan_btn">Scan</string>
+ 		<string name="wlan_connect_btn">Connect</string>
+ 		<string name="wlan_restart_btn">Restart WLAN</string>
++		<string name="wlan_saved_btn">Saved Networks</string>
++		<string name="saved_wlan_hdr">Saved WLAN Networks</string>
++		<string name="no_saved_wlan">No saved WLAN networks</string>
++		<string name="forget_wlan_btn">Forget</string>
+ 		<string name="select_wlan_hdr">Select WLAN to Connect</string>
+ 		<string name="next_btn">Next</string>
+ 	</resources>
+diff --git a/gui/theme/common/portrait.xml b/gui/theme/common/portrait.xml
+index c4eb730..f8b4cbb 100755
+--- a/gui/theme/common/portrait.xml
++++ b/gui/theme/common/portrait.xml
+@@ -3956,13 +3956,23 @@
+ 				</actions>
+ 			</button>
+ 
+-			<button style="main_button_half_height_full_width">
++			<button style="main_button_half_height">
+ 				<condition var1="tw_disable_network" var2="0"/>
+ 				<placement x="%indent%" y="%row21a_y%"/>
+ 				<text>{@wlan_restart_btn=Restart WLAN}</text>
+ 				<action function="wlanrestart"/>
+ 			</button>
+ 
++			<button style="main_button_half_height">
++				<condition var1="tw_disable_network" var2="0"/>
++				<placement x="%center_x%" y="%row21a_y%"/>
++				<text>{@wlan_saved_btn=Saved Networks}</text>
++				<actions>
++					<action function="wlanlistsaved"/>
++					<action function="overlay">select_saved_wlan</action>
++				</actions>
++			</button>
++
+ 			<action>
+ 				<touch key="home"/>
+ 				<action function="page">main</action>
+@@ -5839,6 +5849,65 @@
+ 			</action>
+ 		</page>
+ 
++		<page name="select_saved_wlan">
++			<fill color="%semi_transparent%">
++				<placement x="0" y="0" w="%screen_width%" h="%screen_height%"/>
++			</fill>
++
++			<fill color="%background_color%">
++				<placement x="%indent%" y="row5_y" w="%content_width%" h="%dialog_height%"/>
++			</fill>
++
++			<wlanlist style="partitionlist_storage">
++				<text>{@saved_wlan_hdr=Saved WLAN Networks}</text>
++				<icon selected="radio_true" unselected="radio_false"/>
++				<data name="tw_selected_wlan"/>
++			</wlanlist>
++
++			<text style="text_m">
++				<condition var1="tw_wlan_saved_count" op="=" var2="0"/>
++				<placement x="%center_x%" y="%row9_y%" placement="5"/>
++				<text>{@no_saved_wlan=No saved WLAN networks}</text>
++			</text>
++
++			<button style="button_third_width">
++				<condition var1="tw_wlan_saved_count" op="!=" var2="0"/>
++				<placement x="%dialog_button_x%" y="%row14_y%"/>
++				<text>{@forget_wlan_btn=Forget}</text>
++				<actions>
++					<action function="wlanforget"/>
++					<action function="overlay"/>
++					<action function="page">wlan</action>
++				</actions>
++			</button>
++
++			<fill color="#000000">
++				<placement x="0" y="row25_y" w="%screen_width%" h="%navbar_height"/>
++			</fill>
++
++			<button>
++				<placement x="%back_button_x%" y="%navbar_btn_y%" placement="4"/>
++				<image resource="back"/>
++				<condition var1="tw_busy" var2="0"/>
++				<action function="overlay"/>
++			</button>
++
++			<button>
++				<placement x="%center_x%" y="%navbar_btn_y%" placement="4"/>
++				<image resource="home"/>
++				<condition var1="tw_busy" var2="0"/>
++				<actions>
++					<action function="overlay"/>
++					<action function="key">home</action>
++				</actions>
++			</button>
++
++			<action>
++				<touch key="power+voldown"/>
++				<action function="screenshot"/>
++			</action>
++		</page>
++
+ 		<page name="select_language">
+ 			<fill color="%semi_transparent%">
+ 				<placement x="0" y="0" w="%screen_width%" h="%screen_height%"/>
+diff --git a/gui/theme/extra-languages/languages/zh_CN.xml b/gui/theme/extra-languages/languages/zh_CN.xml
+index 37db78c..9414fcf 100644
+--- a/gui/theme/extra-languages/languages/zh_CN.xml
++++ b/gui/theme/extra-languages/languages/zh_CN.xml
+@@ -783,6 +783,10 @@
+ 		<string name="wlan_scan_btn">扫描</string>
+ 		<string name="wlan_connect_btn">连接</string>
+ 		<string name="wlan_restart_btn">重启 WLAN</string>
++		<string name="wlan_saved_btn">已保存的网络</string>
++		<string name="saved_wlan_hdr">已保存的 WLAN 网络</string>
++		<string name="no_saved_wlan">没有已保存的 WLAN 网络</string>
++		<string name="forget_wlan_btn">忘记</string>
+ 		<string name="select_wlan_hdr">选择需要连接的WiFi</string>
+ 		<string name="next_btn">下一步</string>
+ 	</resources>
+diff --git a/gui/theme/extra-languages/languages/zh_TW.xml b/gui/theme/extra-languages/languages/zh_TW.xml
+index bc85ce5..dc9a60e 100644
+--- a/gui/theme/extra-languages/languages/zh_TW.xml
++++ b/gui/theme/extra-languages/languages/zh_TW.xml
+@@ -792,6 +792,10 @@
+ 		<string name="wlan_scan_btn">掃描</string>
+ 		<string name="wlan_connect_btn">連線</string>
+ 		<string name="wlan_restart_btn">重新啟動 WLAN</string>
++		<string name="wlan_saved_btn">已儲存的網路</string>
++		<string name="saved_wlan_hdr">已儲存的 WLAN 網路</string>
++		<string name="no_saved_wlan">沒有已儲存的 WLAN 網路</string>
++		<string name="forget_wlan_btn">忘記</string>
+ 		<string name="select_wlan_hdr">選擇要連線的 WLAN</string>
+ 		<string name="next_btn">下一步</string>
+ 	</resources>
+
