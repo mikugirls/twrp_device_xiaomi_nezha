@@ -114,6 +114,6 @@ if [ ! -e /sys/class/net/wlan0 ]; then
 fi
 
 ifconfig wlan0 up
-setprop ctl.start nezha-wpa-supplicant
 setprop nezha.wlan.status ready
 log_message "WLAN is ready"
+setprop ctl.start nezha-wlan-autostart
